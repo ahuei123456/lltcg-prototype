@@ -51,30 +51,35 @@ def clean_class_name(class_name):
 
 def parse_info_text(info_text_tag):
     """Extract text from <p class='info-Text'>, replacing <img> tags with their alt text.
-    Handles <br> tags correctly to split into separate lines.
+    Handles <br> tags correctly: starts a new line only if followed by an <img>.
     """
     lines = []
     current_line = []
 
-    for content in info_text_tag.descendants:  # Use .descendants to capture everything properly
+    for content in info_text_tag.children:
         if content.name == "img":
             current_line.append(content["alt"])  # Replace <img> with its alt text
         elif isinstance(content, str):  # Text node
-            text_parts = content.split("\n")  # Sometimes BeautifulSoup keeps newlines
-            for part in text_parts:
-                if part.strip():
-                    current_line.append(part.strip())
+            text = content.strip()
+            if text:
+                current_line.append(text)
         elif content.name == "br":
-            # When encountering <br>, store the current line and start a new one
-            if current_line:
-                lines.append(" ".join(current_line).strip())
-                current_line = []
+            # Check next non-whitespace element after <br>
+            next_sibling = content.find_next_sibling()
+            if next_sibling and next_sibling.name == "img":
+                # Start a new line if next is an <img>
+                if current_line:
+                    lines.append(" ".join(current_line))
+                    current_line = []
+            else:
+                # Otherwise, <br> behaves as inline spacing
+                current_line.append(" ")
 
     # Add the last line if it contains any text
     if current_line:
-        lines.append(" ".join(current_line).strip())
+        lines.append(" ".join(current_line))
 
-    return lines
+    return [line.strip() for line in lines if line.strip()]  # Remove empty lines
 
 
 def get_card_details(card_number):
@@ -102,7 +107,7 @@ def get_card_details(card_number):
             if dt and dd:
                 key = dt.get_text(strip=True)
 
-                # Special handling for '基本ハート', 'ブレードハート', and '必要ハート'
+                # Special handling for '必要ハート', '基本ハート', and 'ブレードハート'
                 if key == "必要ハート":
                     values = {}
                     for span in dd.find_all("span", class_=True):
@@ -125,7 +130,23 @@ def get_card_details(card_number):
                             values[class_name] = span.get_text(strip=True)
                     card_data[key] = values
                 else:
-                    card_data[key] = dd.get_text(strip=True)
+                    # If there's an <img>, replace it with its alt text
+                    content = []
+                    for item in dd.contents:
+                        if item.name == "img":
+                            content.append(item["alt"])  # Use alt text of the image
+                        elif isinstance(item, str):
+                            content.append(item.strip())  # Extract normal text
+
+                    # Store as a string if it's a single value, otherwise as a list
+                    filtered_content = list(
+                        filter(None, content)
+                    )  # Remove empty values
+                    card_data[key] = (
+                        filtered_content
+                        if len(filtered_content) > 1
+                        else filtered_content[0]
+                    )
 
     # Extract info-Text
     info_text_tag = soup.select_one(".info-Text")
@@ -176,7 +197,7 @@ def get_expansion_codes():
 # for card in cards_data:
 #     print(card)
 
-# test = get_card_details("PL!N-bp1-006-SEC")
+# test = get_card_details("LL-bp1-001-R＋")
 # print(test)
 
 codes = get_expansion_codes()
