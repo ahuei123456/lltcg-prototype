@@ -12,93 +12,160 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
+CATEGORY_TRANSLATIONS = {
+    "収録商品": "set",
+    "カードタイプ": "card_type",
+    "作品名": "group",
+    "参加ユニット": "unit",
+    "コスト": "cost",
+    "基本ハート": "hearts",
+    "ブレードハート": "blade_hearts",
+    "ブレード": "blades",
+    "レアリティ": "rarity",
+    "カード番号": "card_number",
+    "スコア": "score",
+    "必要ハート": "required_hearts",
+    "特殊ハート": "special_hearts",
 
-def get_card_list(expansion="NSD01"):
-    """Fetch all cards from the search results, handling pagination automatically."""
-    page = 1
-    all_cards = []
+}
 
-    while True:
-        print(f"Fetching page {page} for expansion {expansion}...")
-        params = {"expansion": expansion, "page": page}
+TEXT_TRANSLATIONS = {
+
+}
+
+
+def _fetch_search_results_page(expansion, page):
+    """Fetches a single page of card search results for an expansion."""
+    print(f"Fetching page {page} for expansion {expansion}...")
+    params = {"expansion": expansion, "page": page}
+    try:
         response = requests.get(SEARCH_URL, headers=HEADERS, params=params)
 
         if response.status_code == 404:
-            break  # Stop when we hit a 404 (no more pages)
+            print(f"Page {page} not found. Reached end of expansion {expansion}.")
+            return None  # Indicates end of pages
 
-        soup = BeautifulSoup(response.text, "html.parser")
-        card_items = soup.select(".ex-item.cardlist-Result_Item.image-Item")
+        response.raise_for_status()  # Raise an exception for other bad status codes
+        return response.text
 
-        if not card_items:
-            break  # Stop if no more cards are found
+    except requests.exceptions.RequestException as e:
+        print(f"An error occurred: {e}")
+        return None  # Indicates a network error
 
-        for div in card_items:
-            card_number = div.get("card", "").strip()
-            img_tag = div.find("img")
-            img_url = BASE_URL + img_tag["src"].lstrip("/") if img_tag else None
-            all_cards.append({"card_number": card_number, "img_url": img_url})
 
+def _parse_card_numbers_from_html(html_content):
+    """Parses search result HTML to extract card numbers."""
+    soup = BeautifulSoup(html_content, "html.parser")
+    card_items = soup.select(".ex-item.cardlist-Result_Item.image-Item")
+
+    card_numbers = []
+    for div in card_items:
+        card_number = div.get("card", "").strip()
+        if card_number:
+            card_numbers.append(card_number)
+
+    return card_numbers
+
+
+def get_card_numbers_from_expansion(expansion="NSD01"):
+    """Orchestrates fetching and parsing all card numbers for an expansion."""
+    page = 1
+    all_card_numbers = []
+
+    while True:
+        html_content = _fetch_search_results_page(expansion, page)
+        if not html_content:
+            break
+
+        card_numbers_on_page = _parse_card_numbers_from_html(html_content)
+        if not card_numbers_on_page:
+            print(f"No cards found on page {page}. Assuming end of expansion {expansion}.")
+            break
+
+        all_card_numbers.extend(card_numbers_on_page)
         page += 1
-        time.sleep(1)  # Avoid spamming the server
+        time.sleep(1)  # Be polite to the server
 
-    return all_cards
-
-
-def clean_class_name(class_name):
-    """Remove 'icon' prefix from class names."""
-    return " ".join(c for c in class_name.split() if c != "icon")
-
+    return all_card_numbers
 
 def parse_info_text(info_text_tag):
-    """Extract text from <p class='info-Text'>, replacing <img> tags with their alt text.
-    Handles <br> tags correctly: starts a new line only if followed by an <img>.
-    """
+    """Extract and format text from the ability/info text block."""
     lines = []
     current_line = []
-
-    for content in info_text_tag.children:
+    prev_br = False
+    for content in info_text_tag.descendants:
         if content.name == "img":
-            current_line.append(content["alt"])  # Replace <img> with its alt text
-        elif isinstance(content, str):  # Text node
+            if prev_br:
+                lines.append(" ".join(current_line))
+                current_line = []
+                prev_br = False
+            alt_text = content.get("alt", "").strip()
+            if alt_text:
+                current_line.append(alt_text)
+        elif isinstance(content, str):
             text = content.strip()
             if text:
+                prev_br = False
                 current_line.append(text)
         elif content.name == "br":
-            # Check next non-whitespace element after <br>
-            next_sibling = content.find_next_sibling()
-            if next_sibling and next_sibling.name == "img":
-                # Start a new line if next is an <img>
-                if current_line:
-                    lines.append(" ".join(current_line))
-                    current_line = []
-            else:
-                # Otherwise, <br> behaves as inline spacing
-                current_line.append(" ")
+            if current_line:
+                prev_br = True
 
-    # Add the last line if it contains any text
     if current_line:
         lines.append(" ".join(current_line))
 
-    return [line.strip() for line in lines if line.strip()]  # Remove empty lines
+    return [line.strip() for line in lines if line.strip()]
 
 
-def get_card_details(card_number):
-    """Fetch detailed card info using a POST request."""
-    response = requests.post(DETAIL_URL, headers=HEADERS, data={"cardno": card_number})
+def _fetch_card_details_page(card_number):
+    """Fetches the HTML for a single card's details page."""
+    # This header makes our request look like it came from the card list page, which is crucial.
+    detail_headers = HEADERS.copy()
+    detail_headers['Referer'] = 'https://llofficial-cardgame.com/cardlist/'
 
-    if response.status_code != 200:
-        return None  # Skip if there's an error
+    try:
+        response = requests.post(DETAIL_URL, headers=detail_headers, data={"cardno": card_number})
+        response.raise_for_status()
 
-    soup = BeautifulSoup(response.text, "html.parser")
+        if not response.text:
+            print(f"Empty response for {card_number}.")
+            return None
+        return response.text
+
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to fetch details for {card_number}. Error: {e}")
+        return None
+
+
+def _parse_card_details(html_content, card_number):
+    """Parses the HTML of a card detail page to extract its data."""
+    soup = BeautifulSoup(html_content, "html.parser")
+
+    # The main container for all the card's information.
+    card_info_container = soup.select_one(".cardlist-Info")
+    if not card_info_container:
+        print(f"Card details container not found for {card_number}.")
+        return None
+
     card_data = {"card_number": card_number}
 
+    # Extract the image URL
+    img_tag = card_info_container.select_one(".info-Image img")
+    if img_tag and img_tag.has_attr('src'):
+        # Ensure the URL is absolute
+        img_src = img_tag['src']
+        if img_src.startswith('/'):
+            card_data["img_url"] = f"{BASE_URL.strip('/')}{img_src}"
+        else:
+            card_data["img_url"] = img_src
+
     # Extract the name
-    member_tag = soup.find("p", class_="info-Heading")
+    member_tag = card_info_container.find("p", class_="info-Heading")
     if member_tag:
         card_data["name"] = member_tag.text.strip()
 
-    # Extract main card info
-    info_detail = soup.select_one(".info-Detail")
+    # Extract main card attributes from the dl/dt/dd list
+    info_detail = card_info_container.select_one(".info-Detail")
     if info_detail:
         for dl_item in info_detail.select(".dl-Item"):
             dt = dl_item.find("dt")
@@ -106,110 +173,118 @@ def get_card_details(card_number):
 
             if dt and dd:
                 key = dt.get_text(strip=True)
+                if key in CATEGORY_TRANSLATIONS:
+                    key = CATEGORY_TRANSLATIONS[key]
 
-                # Special handling for '必要ハート', '基本ハート', and 'ブレードハート'
-                if key == "必要ハート":
+                # Handling for hearts, which can have nested spans or special images
+                if key in ["required_hearts", "hearts", "blade_hearts"]:
                     values = {}
-                    for span in dd.find_all("span", class_=True):
-                        class_name = next(
-                            (cls for cls in span["class"] if "heart" in cls), None
-                        )  # Find class containing "heart"
-                        heart_value = span.get_text(
-                            strip=True
-                        )  # Extract number inside span
-                        if class_name:
-                            values[class_name] = heart_value  # Store as dictionary
-                    card_data[key] = values
-                elif key in ["基本ハート", "ブレードハート"]:
-                    values = {}
-                    for span in dd.find_all("span", class_=True):
-                        class_name = next(
-                            (cls for cls in span["class"] if "heart" in cls), None
-                        )
-                        if class_name:
-                            values[class_name] = span.get_text(strip=True)
-                    card_data[key] = values
+                    spans = dd.find_all("span")
+                    if spans:
+                        for span in spans:
+                            class_name = next((cls for cls in span.get("class", []) if "heart" in cls), None)
+                            if class_name:
+                                text = span.get_text(strip=True)
+                                # An empty span for a heart implies a value of 1, per business logic.
+                                if len(text) == 0:
+                                    text = "1"
+                                values[class_name] = text
+                        card_data[key] = values
+                    # Handle edge case for blade_hearts with an 'ALL' image instead of spans
+                    elif key == "blade_hearts" and dd.find("img", alt="ALL1"):
+                        card_data[key] = {"ALL1": "1"}
+                elif key == "special_hearts":
+                    if len(dd.text.strip()) > 0:
+                        card_data[key] = dd.text.strip()
+                    else:
+                        card_data[key] = dd.find("img")['alt'][:-1]
+                elif key == "group":
+                    card_data[key] = [group for group in dd.strings]
                 else:
-                    # If there's an <img>, replace it with its alt text
-                    content = []
-                    for item in dd.contents:
-                        if item.name == "img":
-                            content.append(item["alt"])  # Use alt text of the image
-                        elif isinstance(item, str):
-                            content.append(item.strip())  # Extract normal text
+                    card_data[key] = dd.get_text(strip=True)
 
-                    # Store as a string if it's a single value, otherwise as a list
-                    filtered_content = list(
-                        filter(None, content)
-                    )  # Remove empty values
-                    card_data[key] = (
-                        filtered_content
-                        if len(filtered_content) > 1
-                        else filtered_content[0]
-                    )
-
-    # Extract info-Text
-    info_text_tag = soup.select_one(".info-Text")
+    # Extract the card's ability text
+    info_text_tag = card_info_container.select_one(".info-Text")
     if info_text_tag:
         card_data["info_text"] = parse_info_text(info_text_tag)
+
+    # Add the original card number again for consistency, as some older cards might have it in the details
+    if "card_number" not in card_data:
+        card_data["card_number"] = card_number
 
     return card_data
 
 
-def scrape_all_cards(expansion="NSD01"):
-    """Main function to fetch all cards and their details."""
-    all_cards = get_card_list(expansion)
+def get_card_details(card_number):
+    """Fetches and parses detailed card info."""
+    html_content = _fetch_card_details_page(card_number)
+    if not html_content:
+        return None
 
-    for card in all_cards:
-        print(f"Fetching details for {card['card_number']}...")
-        details = get_card_details(card["card_number"])
-        if details:
-            card.update(details)
-
-        time.sleep(1)  # Avoid spamming the server
-
-    return all_cards
+    return _parse_card_details(html_content, card_number)
 
 
-def get_expansion_codes():
-    """Scrape the main card list page and extract expansion codes."""
-    response = requests.get(f"{BASE_URL}cardlist/", headers=HEADERS)
+def _fetch_cardlist_page():
+    """Fetches the main cardlist page HTML."""
+    cardlist_url = f"{BASE_URL}cardlist/"
+    try:
+        response = requests.get(cardlist_url, headers=HEADERS)
+        response.raise_for_status()
+        return response.text
+    except requests.exceptions.RequestException as e:
+        print(f"Could not fetch expansion codes page. Error: {e}")
+        return None
 
-    if response.status_code != 200:
-        return []  # Return an empty list if request fails
-
-    soup = BeautifulSoup(response.text, "html.parser")
+def _parse_expansion_codes(html_content):
+    """Parses the cardlist page HTML to extract expansion codes."""
+    soup = BeautifulSoup(html_content, "html.parser")
     expansion_codes = []
 
-    for item in soup.select(".productsSearch-Item a"):
+    # Select all 'a' tags that have the 'productsList-Item' class.
+    # The dot '.' is crucial for selecting by class name.
+    for item in soup.select("a.productsList-Item"):
         href = item.get("href", "")
         match = re.search(r"expansion=([\w\d-]+)", href)
         if match:
             expansion_codes.append(match.group(1))
 
+    # The same expansion code can appear multiple times on the page.
+    # We return a list of unique codes, preserving the order of first appearance.
+    return list(dict.fromkeys(expansion_codes))
+
+def get_expansion_codes():
+    """Scrape the main card list page and extract all expansion codes."""
+    print("Fetching expansion codes...")
+    html_content = _fetch_cardlist_page()
+    if not html_content:
+        return []
+    expansion_codes = _parse_expansion_codes(html_content)
+    print(f"Found {len(expansion_codes)} expansion codes.")
     return expansion_codes
 
+# --- Main Execution ---
+if __name__ == "__main__":
+    all_expansion_codes = get_expansion_codes()
+    all_cards_data = []
 
-# # Run the scraper
-# cards_data = scrape_all_cards()
+    if not all_expansion_codes:
+        print("No expansion codes found. Exiting.")
+    else:
+        for code in all_expansion_codes:
+            print(f"\n--- Starting scrape for expansion: {code} ---")
+            card_numbers = get_card_numbers_from_expansion(code)
+            
+            for number in card_numbers:
+                print(f"Fetching details for {number}...")
+                details = get_card_details(number)
+                if details:
+                    all_cards_data.append(details)
+                
+                # time.sleep(1) # Be polite to the server
 
-# # Print or save the data
-# for card in cards_data:
-#     print(card)
+        # Save the scraped data to a JSON file
+        output_file = "card_data_new.json"
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(all_cards_data, f, ensure_ascii=False, indent=4)
 
-# test = get_card_details("LL-bp1-001-R＋")
-# print(test)
-
-codes = get_expansion_codes()
-cards = []
-
-for code in codes:
-    data = scrape_all_cards(code)
-    cards.extend(data)
-
-# Save the scraped data to a JSON file
-output_file = "card_data.json"
-with open(output_file, "w", encoding="utf-8") as f:
-    json.dump(cards, f, ensure_ascii=False, indent=4)
-
-print(f"Data saved to {output_file}")
+        print(f"\nScraping complete. Data for {len(all_cards_data)} cards saved to {output_file}")
