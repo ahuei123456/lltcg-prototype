@@ -1,0 +1,13 @@
+[project]
+name = "lltcg-prototype"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiolimiter>=1.2.1",
+    "bs4>=0.0.2",
+    "httpx>=0.28.1",
+    "inquirerpy>=0.3.4",
+    "tqdm>=4.67.1",
+]

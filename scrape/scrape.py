@@ -1,12 +1,17 @@
-import requests
-from bs4 import BeautifulSoup
-import time
+import asyncio
+import logging
 import re
-import json
+from urllib.parse import urljoin
+
+import httpx
+from bs4 import BeautifulSoup
+from tqdm.asyncio import tqdm
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "https://llofficial-cardgame.com/"
-SEARCH_URL = f"{BASE_URL}cardlist/cardsearch_ex"
-DETAIL_URL = f"{BASE_URL}cardlist/detail/"
+SEARCH_URL = urljoin(BASE_URL, "cardlist/cardsearch_ex")
+DETAIL_URL = urljoin(BASE_URL, "cardlist/detail/")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -26,30 +31,27 @@ CATEGORY_TRANSLATIONS = {
     "スコア": "score",
     "必要ハート": "required_hearts",
     "特殊ハート": "special_hearts",
-
 }
 
-TEXT_TRANSLATIONS = {
-
-}
+TEXT_TRANSLATIONS = {}
 
 
-def _fetch_search_results_page(expansion, page):
+async def _fetch_search_results_page(client, expansion, page):
     """Fetches a single page of card search results for an expansion."""
-    print(f"Fetching page {page} for expansion {expansion}...")
+    logger.info("Fetching page %s for expansion %s...", page, expansion)
     params = {"expansion": expansion, "page": page}
     try:
-        response = requests.get(SEARCH_URL, headers=HEADERS, params=params)
+        response = await client.get(SEARCH_URL, headers=HEADERS, params=params)
 
         if response.status_code == 404:
-            print(f"Page {page} not found. Reached end of expansion {expansion}.")
+            logger.info("Page %s not found. Reached end of expansion %s.", page, expansion)
             return None  # Indicates end of pages
 
         response.raise_for_status()  # Raise an exception for other bad status codes
         return response.text
 
-    except requests.exceptions.RequestException as e:
-        print(f"An error occurred: {e}")
+    except httpx.RequestError as e:
+        logger.error("An error occurred while requesting %r: %s", e.request.url, e)
         return None  # Indicates a network error
 
 
@@ -67,26 +69,29 @@ def _parse_card_numbers_from_html(html_content):
     return card_numbers
 
 
-def get_card_numbers_from_expansion(expansion="NSD01"):
+async def get_card_numbers_from_expansion(client, expansion="NSD01"):
     """Orchestrates fetching and parsing all card numbers for an expansion."""
     page = 1
     all_card_numbers = []
 
     while True:
-        html_content = _fetch_search_results_page(expansion, page)
+        html_content = await _fetch_search_results_page(client, expansion, page)
         if not html_content:
             break
 
         card_numbers_on_page = _parse_card_numbers_from_html(html_content)
         if not card_numbers_on_page:
-            print(f"No cards found on page {page}. Assuming end of expansion {expansion}.")
+            logger.info(
+                "No cards found on page %s. Assuming end of expansion %s.", page, expansion
+            )
             break
 
         all_card_numbers.extend(card_numbers_on_page)
         page += 1
-        time.sleep(1)  # Be polite to the server
+        await asyncio.sleep(1)  # Be polite to the server
 
     return all_card_numbers
+
 
 def parse_info_text(info_text_tag):
     """Extract and format text from the ability/info text block."""
@@ -117,23 +122,25 @@ def parse_info_text(info_text_tag):
     return [line.strip() for line in lines if line.strip()]
 
 
-def _fetch_card_details_page(card_number):
+async def _fetch_card_details_page(client, card_number):
     """Fetches the HTML for a single card's details page."""
     # This header makes our request look like it came from the card list page, which is crucial.
     detail_headers = HEADERS.copy()
-    detail_headers['Referer'] = 'https://llofficial-cardgame.com/cardlist/'
+    detail_headers["Referer"] = urljoin(BASE_URL, "cardlist/")
 
     try:
-        response = requests.post(DETAIL_URL, headers=detail_headers, data={"cardno": card_number})
+        response = await client.post(
+            DETAIL_URL, headers=detail_headers, data={"cardno": card_number}
+        )
         response.raise_for_status()
 
         if not response.text:
-            print(f"Empty response for {card_number}.")
+            logger.warning("Empty response for %s.", card_number)
             return None
         return response.text
 
-    except requests.exceptions.RequestException as e:
-        print(f"Failed to fetch details for {card_number}. Error: {e}")
+    except httpx.RequestError as e:
+        logger.error("Failed to fetch details for %s.", card_number, exc_info=True)
         return None
 
 
@@ -144,20 +151,16 @@ def _parse_card_details(html_content, card_number):
     # The main container for all the card's information.
     card_info_container = soup.select_one(".cardlist-Info")
     if not card_info_container:
-        print(f"Card details container not found for {card_number}.")
+        logger.warning("Card details container not found for %s.", card_number)
         return None
 
     card_data = {"card_number": card_number}
 
     # Extract the image URL
     img_tag = card_info_container.select_one(".info-Image img")
-    if img_tag and img_tag.has_attr('src'):
+    if img_tag and img_tag.has_attr("src"):
         # Ensure the URL is absolute
-        img_src = img_tag['src']
-        if img_src.startswith('/'):
-            card_data["img_url"] = f"{BASE_URL.strip('/')}{img_src}"
-        else:
-            card_data["img_url"] = img_src
+        card_data["img_url"] = urljoin(BASE_URL, img_tag["src"])
 
     # Extract the name
     member_tag = card_info_container.find("p", class_="info-Heading")
@@ -182,7 +185,14 @@ def _parse_card_details(html_content, card_number):
                     spans = dd.find_all("span")
                     if spans:
                         for span in spans:
-                            class_name = next((cls for cls in span.get("class", []) if "heart" in cls), None)
+                            class_name = next(
+                                (
+                                    cls
+                                    for cls in span.get("class", [])
+                                    if "heart" in cls
+                                ),
+                                None,
+                            )
                             if class_name:
                                 text = span.get_text(strip=True)
                                 # An empty span for a heart implies a value of 1, per business logic.
@@ -197,7 +207,7 @@ def _parse_card_details(html_content, card_number):
                     if len(dd.text.strip()) > 0:
                         card_data[key] = dd.text.strip()
                     else:
-                        card_data[key] = dd.find("img")['alt'][:-1]
+                        card_data[key] = dd.find("img")["alt"][:-1]
                 elif key == "group":
                     card_data[key] = [group for group in dd.strings]
                 else:
@@ -215,76 +225,77 @@ def _parse_card_details(html_content, card_number):
     return card_data
 
 
-def get_card_details(card_number):
+async def get_card_details(client, card_number):
     """Fetches and parses detailed card info."""
-    html_content = _fetch_card_details_page(card_number)
+    logger.info("Fetching details for %s...", card_number)
+    html_content = await _fetch_card_details_page(client, card_number)
     if not html_content:
         return None
 
     return _parse_card_details(html_content, card_number)
 
 
-def _fetch_cardlist_page():
+async def _fetch_cardlist_page(client):
     """Fetches the main cardlist page HTML."""
-    cardlist_url = f"{BASE_URL}cardlist/"
+    cardlist_url = urljoin(BASE_URL, "cardlist/")
     try:
-        response = requests.get(cardlist_url, headers=HEADERS)
+        response = await client.get(cardlist_url, headers=HEADERS)
         response.raise_for_status()
         return response.text
-    except requests.exceptions.RequestException as e:
-        print(f"Could not fetch expansion codes page. Error: {e}")
+    except httpx.RequestError as e:
+        logger.error("Could not fetch expansion codes page. Error: %s", e)
         return None
 
-def _parse_expansion_codes(html_content):
-    """Parses the cardlist page HTML to extract expansion codes."""
+
+def _parse_expansions(html_content) -> list[dict[str, str]]:
+    """Parses the cardlist page HTML to extract expansion codes and their names."""
     soup = BeautifulSoup(html_content, "html.parser")
-    expansion_codes = []
+    expansions = []
+    seen_codes = set()
 
     # Select all 'a' tags that have the 'productsList-Item' class.
-    # The dot '.' is crucial for selecting by class name.
     for item in soup.select("a.productsList-Item"):
         href = item.get("href", "")
         match = re.search(r"expansion=([\w\d-]+)", href)
         if match:
-            expansion_codes.append(match.group(1))
+            code = match.group(1)
+            # Ensure we only add each expansion once
+            if code not in seen_codes:
+                title_tag = item.select_one("p.item-Title")
+                name = (
+                    title_tag.get_text(strip=True) if title_tag else "Unknown Expansion"
+                )
 
-    # The same expansion code can appear multiple times on the page.
-    # We return a list of unique codes, preserving the order of first appearance.
-    return list(dict.fromkeys(expansion_codes))
+                expansions.append({"code": code, "name": name})
+                seen_codes.add(code)
 
-def get_expansion_codes():
-    """Scrape the main card list page and extract all expansion codes."""
-    print("Fetching expansion codes...")
-    html_content = _fetch_cardlist_page()
+    return expansions
+
+
+async def get_expansion_codes(client) -> list[dict[str, str]]:
+    """Scrape the main card list page and extract all expansion codes and their names."""
+    logger.info("Fetching expansion codes...")
+    html_content = await _fetch_cardlist_page(client)
     if not html_content:
         return []
-    expansion_codes = _parse_expansion_codes(html_content)
-    print(f"Found {len(expansion_codes)} expansion codes.")
-    return expansion_codes
+    expansions = _parse_expansions(html_content)
+    logger.info("Found %s expansions.", len(expansions))
+    return expansions
 
-# --- Main Execution ---
-if __name__ == "__main__":
-    all_expansion_codes = get_expansion_codes()
-    all_cards_data = []
 
-    if not all_expansion_codes:
-        print("No expansion codes found. Exiting.")
-    else:
-        for code in all_expansion_codes:
-            print(f"\n--- Starting scrape for expansion: {code} ---")
-            card_numbers = get_card_numbers_from_expansion(code)
-            
-            for number in card_numbers:
-                print(f"Fetching details for {number}...")
-                details = get_card_details(number)
-                if details:
-                    all_cards_data.append(details)
-                
-                # time.sleep(1) # Be polite to the server
+async def scrape_expansion(client, code):
+    """Scrapes all cards for a single expansion concurrently."""
+    logger.info("--- Starting scrape for expansion: %s ---", code)
+    card_numbers = await get_card_numbers_from_expansion(client, code)
 
-        # Save the scraped data to a JSON file
-        output_file = "card_data_new.json"
-        with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(all_cards_data, f, ensure_ascii=False, indent=4)
+    # Create a list of tasks to fetch card details
+    tasks = [get_card_details(client, number) for number in card_numbers]
+    # Use tqdm.gather for a nested progress bar for cards within an expansion
+    results = await tqdm.gather(*tasks, desc=f"Cards in {code}", leave=False)
 
-        print(f"\nScraping complete. Data for {len(all_cards_data)} cards saved to {output_file}")
+    # Filter out None results from failed requests
+    expansion_cards_data = [details for details in results if details]
+    logger.info(
+        "--- Finished scrape for expansion: %s, found %s cards. ---", code, len(expansion_cards_data)
+    )
+    return expansion_cards_data
