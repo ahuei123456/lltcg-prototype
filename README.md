@@ -35,10 +35,9 @@ irm https://astral.sh/uv/install.ps1 | iex
 Clone this project to your local machine.
 
 ```shell
-git clone https://github.com/your-username/lltcg-prototype.git
+git clone git@github.com:ahuei123456/lltcg-prototype.git
 cd lltcg-prototype
 ```
-*(Note: Replace the URL with the actual repository URL.)*
 
 ### 3. Create Virtual Environment & Install Dependencies
 
