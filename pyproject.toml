@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiolimiter>=1.2.1",
-    "bs4>=0.0.2",
+    "beautifulsoup4>=4.12.3",
     "httpx>=0.28.1",
     "inquirerpy>=0.3.4",
     "tqdm>=4.67.1",
